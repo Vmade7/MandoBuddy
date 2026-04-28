@@ -4,11 +4,14 @@ import {
   Sparkles, BookOpen, User, Mic, MicOff, RotateCcw,
   ChevronRight, Star, Trophy, ChevronDown, Volume2, CheckCircle2,
 } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { WaveformDisplay } from '../components/pronunciation/WaveformDisplay';
 import { RingScore } from '../components/pronunciation/RingScore';
 import { DimensionBar } from '../components/pronunciation/DimensionBar';
 import { SyllableBreakdown, type Syllable } from '../components/pronunciation/SyllableBreakdown';
+import { useAuth } from '@/contexts/AuthContext';
+import { evaluatePronunciation } from '@/services/pronunciation';
 
 // ─── Data ──────────────────────────────────────────────────────────────────────
 
@@ -159,39 +162,102 @@ function getEncouragement(score: number) {
 
 export function PronunciationPage() {
   const navigate = useNavigate();
+  const { userId } = useAuth();
   const [selectedId, setSelectedId] = useState(1);
   const [recordState, setRecordState] = useState<RecordState>('idle');
   const [elapsed, setElapsed] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const [score, setScore] = useState<ReturnType<typeof generateScore> | null>(null);
+  const [apiTips, setApiTips] = useState<string[] | null>(null);
   const [resultVisible, setResultVisible] = useState(false);
   const [selectorOpen, setSelectorOpen] = useState(false);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const processingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const sentence = SENTENCES.find((s) => s.id === selectedId)!;
 
   // ── Recording logic ──────────────────────────────────────────────────────
 
-  const startRecording = useCallback(() => {
+  const startRecording = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      toast.error('Your browser does not support microphone access');
+      return;
+    }
+
+    if (!userId) {
+      toast.error('Please sign in to use pronunciation assessment');
+      navigate('/login');
+      return;
+    }
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      toast.error('Microphone access denied — please allow it in your browser settings');
+      return;
+    }
+
+    streamRef.current = stream;
+    chunksRef.current = [];
+
+    // Capture the sentence id and userId at the moment recording starts
+    const capturedSentenceId = selectedId;
+    const capturedUserId = userId;
+
+    const mr = new MediaRecorder(stream);
+    mediaRecorderRef.current = mr;
+
+    mr.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+
+    mr.onstop = async () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+
+      try {
+        const res = await evaluatePronunciation(capturedUserId, blob);
+        const d = res.data;
+        setScore({
+          overall: Math.round(d.total_score),
+          tone: Math.round(d.pitch_score),
+          clarity: Math.round(d.clarity_score),
+          fluency: Math.round(d.duration_score),
+        });
+        setApiTips(d.feedback);
+        setAttempt((a) => a + 1);
+        setRecordState('result');
+        setTimeout(() => setResultVisible(true), 80);
+      } catch {
+        // error toast shown by apiClient; fall back to mock score so UI isn't stuck
+        const newAttempt = attempt + 1;
+        setAttempt(newAttempt);
+        setScore(generateScore(capturedSentenceId, newAttempt));
+        setApiTips(null);
+        setRecordState('result');
+        setTimeout(() => setResultVisible(true), 80);
+      }
+    };
+
+    // Request data every 250 ms so we always get chunks even for short recordings
+    mr.start(250);
     setRecordState('recording');
     setElapsed(0);
     setResultVisible(false);
     timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
-  }, []);
+  }, [userId, selectedId, attempt, navigate]);
 
   const stopRecording = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     setRecordState('processing');
-    processingRef.current = setTimeout(() => {
-      const newAttempt = attempt + 1;
-      setAttempt(newAttempt);
-      setScore(generateScore(sentence.id, newAttempt));
-      setRecordState('result');
-      setTimeout(() => setResultVisible(true), 80);
-    }, 1600);
-  }, [attempt, sentence.id]);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  }, []);
 
   const handleRecordButton = () => {
     if (recordState === 'idle' || recordState === 'result') startRecording();
@@ -200,9 +266,13 @@ export function PronunciationPage() {
 
   const handleReset = () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (processingRef.current) clearTimeout(processingRef.current);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
     setRecordState('idle');
     setScore(null);
+    setApiTips(null);
     setResultVisible(false);
     setElapsed(0);
   };
@@ -216,7 +286,10 @@ export function PronunciationPage() {
 
   useEffect(() => () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (processingRef.current) clearTimeout(processingRef.current);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
   }, []);
 
   const enc = score ? getEncouragement(score.overall) : null;
@@ -531,7 +604,7 @@ export function PronunciationPage() {
               </div>
               <SyllableBreakdown
                 syllables={sentence.syllables as Syllable[]}
-                tips={sentence.tips}
+                tips={apiTips ?? sentence.tips}
               />
             </div>
 

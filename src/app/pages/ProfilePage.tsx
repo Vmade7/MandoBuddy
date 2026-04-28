@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import {
   Sparkles, BookOpen, Globe, User, Flame, Trophy,
@@ -6,12 +6,17 @@ import {
   ChevronRight, Clock, Calendar, Lock, TrendingUp,
   BarChart3, Award, Layers,
 } from 'lucide-react';
+import { format } from 'date-fns';
 import { AbilityRadar } from '../components/profile/AbilityRadar';
 import { CultureGallery, type CultureItem } from '../components/profile/CultureGallery';
+import { useAuth } from '@/contexts/AuthContext';
+import { getUserById } from '@/services/users';
+import { getProgress } from '@/services/progress';
+import type { UserData, ProgressData } from '@/types/api';
 
 // ─── Mock Data ─────────────────────────────────────────────────────────────────
 
-const USER = {
+const MOCK_USER = {
   name: 'Alex Chen',
   username: '@alexchen_learns',
   avatar: 'https://images.unsplash.com/photo-1575773559135-b8507544ba4e?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=200',
@@ -87,14 +92,38 @@ const WEEKLY = [
   { day: 'Sun', minutes: 45 },
 ];
 
-const XP_PERCENT = Math.round((USER.xp / USER.xpNext) * 100);
-
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export function ProfilePage() {
   const navigate = useNavigate();
+  const { userId } = useAuth();
   const [activeTab, setActiveTab] = useState<'overview' | 'culture' | 'badges' | 'activity'>('overview');
   const [hoveredBadge, setHoveredBadge] = useState<string | null>(null);
+
+  // ── Real API data (falls back to MOCK_USER when not loaded) ────────────────
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [progressData, setProgressData] = useState<ProgressData | null>(null);
+
+  useEffect(() => {
+    if (!userId) return;
+    getUserById(userId).then((res) => setUserData(res.data)).catch(() => {});
+    getProgress(userId).then((res) => setProgressData(res.data)).catch(() => {});
+  }, [userId]);
+
+  // Merge real data over mock defaults so all existing JSX references (USER.xxx) still work
+  const USER = {
+    ...MOCK_USER,
+    name: userData?.display_name ?? MOCK_USER.name,
+    username: userData ? userData.email : MOCK_USER.username,
+    joinDate: userData?.created_at
+      ? format(new Date(userData.created_at), 'MMM yyyy')
+      : MOCK_USER.joinDate,
+    level: progressData?.level ?? MOCK_USER.level,
+    xp: progressData?.xp ?? MOCK_USER.xp,
+    xpNext: (progressData?.level ?? MOCK_USER.level) * 350 + 500,
+  };
+
+  const XP_PERCENT = Math.round((USER.xp / USER.xpNext) * 100);
 
   const earnedCount = BADGES.filter((b) => b.earned).length;
   const collectedCount = CULTURE_ITEMS.filter((c) => c.collected).length;
